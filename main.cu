@@ -1,4 +1,8 @@
+#include <cstddef>
+#include <cstdio>
+#include <cstring>
 #include <glad/gl.h>
+#include <utility>
 #define GLFW_INCLUDE_NONE
 #include <GLFW/glfw3.h>
 #include <cuda_gl_interop.h>
@@ -7,37 +11,51 @@
 #include <stdio.h>
 #include <cassert>
 
-static const struct
+#include <chrono>
+#include <thread>
+
+static const struct Vertex
 {
     float x, y;
-    float r, g, b;
-} vertices[3] =
+    float u, v;
+} vertices[6] =
 {
-    { -0.6f, -0.4f, 1.f, 0.f, 0.f },
-    {  0.6f, -0.4f, 0.f, 1.f, 0.f },
-    {   0.f,  0.6f, 0.f, 0.f, 1.f }
+    { -1.f, -1.f, 0.f, 0.f, },
+    {  1.f, -1.f, 1.f, 0.f, },
+    {  1.f,  1.f, 1.f, 1.f, },
+
+    { -1.f, -1.f, 0.f, 0.f },
+    {  1.f,  1.f, 1.f, 1.f },
+    { -1.f,  1.f, 0.f, 1.f },
 };
 
-static const char* vertex_shader_text =
-"#version 330 core\n"
-"in vec3 vCol;\n"
-"in vec2 vPos;\n"
-"out vec3 color;\n"
-"void main()\n"
-"{\n"
-"    gl_Position = vec4(vPos, 0.0, 1.0);\n"
-"    color = vCol;\n"
-"}\n";
+static const char* vertex_shader_text = R"glsl(
+#version 330 core
+layout(location = 0) in vec2 pos;
+layout(location = 1) in vec2 uv;
 
-static const char* fragment_shader_text =
-"#version 330 core\n"
-"in vec3 color;\n"
-"uniform sampler2D tex;"
-"void main()\n"
-"{\n"
-"    vec4 c = texture(tex, gl_FragCoord.xy);"
-"    gl_FragColor = vec4(c.xyz, 1.0);\n"
-"}\n";
+out vec2 uvOut;
+
+void main()
+{
+    gl_Position = vec4(pos, 0., 1.0);
+    uvOut = uv;
+}
+)glsl";
+
+static const char* fragment_shader_text = R"glsl(
+#version 330 core
+
+in vec2 uvOut;
+
+uniform sampler2D tex;
+
+void main()
+{
+    vec4 c = texture(tex, uvOut.xy);
+    gl_FragColor = vec4(c.xyz, 1.0);
+}
+)glsl";
 
 static void error_callback(int error, const char* description)
 {
@@ -50,19 +68,109 @@ static void key_callback(GLFWwindow* window, int key, int scancode, int action, 
         glfwSetWindowShouldClose(window, GLFW_TRUE);
 }
 
-__global__ void cudaFill(unsigned char* col)
+__host__ __device__ bool get_cell(unsigned char* buf, int x, int y, int w, int h) {
+    const int i = (y * w + x) * 4;
+    return buf[i] > 0;
+}
+
+__host__ __device__ void set_cell(unsigned char* buf, int x, int y, int w, int h, bool val) {
+    const int i = (y * w + x) * 4;
+    const int v = val ? 255 : 0;
+    buf[i + 0] = v;
+    buf[i + 1] = v;
+    buf[i + 2] = v;
+    buf[i + 3] = v;
+}
+
+__host__ __device__ int mod(int a, int b) {
+    const int r = a % b;
+    return r >= 0 ? r : r + b;
+}
+
+void cpu_init(unsigned char* out, int w, int h) {
+    memset(out, 0, w * h * 4);
+    
+    const char* data = R"game(
+    
+
+.........................x
+.......................x.x
+.............xx......xx............xx
+............x...x....xx............xx
+.xx........x.....x...xx
+.xx........x...x.xx....x.x
+...........x.....x.......x
+............x...x
+.............xx..
+)game";
+    
+    const int start_x = 20;
+    int x = start_x;
+    int y = 100;
+    
+    while (*data != '\0') {
+        if (*data == 'x') {
+            set_cell(out, x, y, w, h, true);
+        }
+        
+        if (*data == '\n') {
+            y -= 1; 
+            x = start_x;
+        }
+        
+        x += 1;
+        data += 1;
+    }
+}
+
+__global__ void cuda_init(unsigned char* out, int w, int h)
 {
-    const int i = (blockIdx.x * 128 + threadIdx.x) * 3;
-    col[i + 0] = 255;
-    col[i + 1] = 0;
-    col[i + 2] = 0;
+    return;
+
+    const int x = blockIdx.x * blockDim.x + threadIdx.x;
+    const int y = blockIdx.y * blockDim.y + threadIdx.y;
+    
+    const int i = (y * w + x) * 4;
+
+    float t0 = (float)x / w;
+    float t1 = (float)y / h;
+
+    out[i + 0] = t0 * 255;
+    out[i + 1] = 0;
+    out[i + 2] = t1 * 255;
+    out[i + 3] = 255;
+}
+
+__global__ void cuda_frame(unsigned char* in, unsigned char* out, int w, int h)
+{
+    const int x = blockIdx.x * blockDim.x + threadIdx.x;
+    const int y = blockIdx.y * blockDim.y + threadIdx.y;
+    
+    int n = 0;
+    n += get_cell(in, mod(x - 1, w), mod(y - 1, h), w, h);
+    n += get_cell(in, mod(x - 0, w), mod(y - 1, h), w, h);
+    n += get_cell(in, mod(x + 1, w), mod(y - 1, h), w, h);
+
+    n += get_cell(in, mod(x - 1, w), mod(y - 0, h), w, h);
+    //n += get_cell(in, mod(x - 0, w), mod(y - 0, h), w, h);
+    n += get_cell(in, mod(x + 1, w), mod(y - 0, h), w, h);
+    
+    n += get_cell(in, mod(x - 1, w), mod(y + 1, h), w, h);
+    n += get_cell(in, mod(x - 0, w), mod(y + 1, h), w, h);
+    n += get_cell(in, mod(x + 1, w), mod(y + 1, h), w, h);
+    
+    if (get_cell(in, x, y, w, h)) {
+        set_cell(out, x, y, w, h, n >= 2 && n <= 3);
+    }
+    else {
+        set_cell(out, x, y, w, h, n == 3);
+    }
 }
 
 int main(void)
 {
     GLFWwindow* window;
     GLuint vertex_buffer, vertex_shader, fragment_shader, program;
-    GLint vpos_location, vcol_location;
 
     glfwSetErrorCallback(error_callback);
 
@@ -124,103 +232,112 @@ int main(void)
     glAttachShader(program, fragment_shader);
     glLinkProgram(program);
 
-    vpos_location = glGetAttribLocation(program, "vPos");
-    vcol_location = glGetAttribLocation(program, "vCol");
 
-    glEnableVertexAttribArray(vpos_location);
-    glVertexAttribPointer(vpos_location, 2, GL_FLOAT, GL_FALSE,
-                          sizeof(vertices[0]), (void*) 0);
-    glEnableVertexAttribArray(vcol_location);
-    glVertexAttribPointer(vcol_location, 3, GL_FLOAT, GL_FALSE,
-                          sizeof(vertices[0]), (void*) (sizeof(float) * 2));
+    glEnableVertexAttribArray(0);
+    glVertexAttribPointer(0, 2, GL_FLOAT, GL_FALSE,
+                          sizeof(vertices[0]), (const void*)offsetof(Vertex, x));
 
+    glEnableVertexAttribArray(1);
+    glVertexAttribPointer(1, 2, GL_FLOAT, GL_FALSE,
+                          sizeof(vertices[0]), (const void*)offsetof(Vertex, u));
 
 
     cudaError_t res;
 
-
-
-    const int size_bytes = 128 * 128 * 3;
-
-    unsigned char* cuda_buf;
-    res = cudaMalloc(&cuda_buf, size_bytes);
+    const int size_bytes = 128 * 128 * 4;
+    
+    unsigned char* cuda_buf[2];
+    res = cudaMalloc(&cuda_buf[0], size_bytes);
     if (res != cudaSuccess) {
         printf("ERROR: %s: %s\n", cudaGetErrorName(res), cudaGetErrorString(res));
         exit(1);
     }
 
-
-    cudaFill<<<128, 128>>>(cuda_buf);
-
-    res = cudaPeekAtLastError();
+    res = cudaMalloc(&cuda_buf[1], size_bytes);
     if (res != cudaSuccess) {
         printf("ERROR: %s: %s\n", cudaGetErrorName(res), cudaGetErrorString(res));
         exit(1);
     }
-
-    unsigned char* cpu_buf = (unsigned char*)malloc(size_bytes);
-    res = cudaMemcpy(cpu_buf, cuda_buf, size_bytes, cudaMemcpyDeviceToHost);
-    if (res != cudaSuccess) {
-        printf("ERROR: %s: %s\n", cudaGetErrorName(res), cudaGetErrorString(res));
-        exit(1);
-    }
-
-    for (int i = 0; i < size_bytes; ++i) {
-        // assert(cpu_buf[i] == 128);
-    }
-
+    
+    const dim3 image_size{128, 128};
+    
+    const dim3 threads{16, 16};
+    const dim3 blocks{
+        image_size.x / threads.x,
+        image_size.y / threads.y,
+    };
 
 
     GLuint tex;
     glGenTextures(1, &tex);
     glBindTexture(GL_TEXTURE_2D, tex);
 
-//    auto* data = new float[128*128*3];
-//    for (int i = 0; i < 128*128*3; ++i) {
-//        data[i] = 1.f;
-//    }
-    // glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8UI_EXT, 128, 128, 0, GL_RGBA_INTEGER_EXT, GL_UNSIGNED_BYTE, nullptr);
-    // glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
-    // glBindTexture(GL_TEXTURE_2D, 0);
-
-    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGB, 128, 128, 0, GL_RGB, GL_UNSIGNED_BYTE, nullptr);
+    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, 128, 128, 0, GL_RGBA, GL_UNSIGNED_BYTE, nullptr);
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
 
 
-     cudaGraphicsResource* tex_res;
-     res = cudaGraphicsGLRegisterImage(&tex_res, tex, GL_TEXTURE_2D, cudaGraphicsRegisterFlagsSurfaceLoadStore);
-     if (res != cudaSuccess) {
-         printf("ERROR: %s: %s\n", cudaGetErrorName(res), cudaGetErrorString(res));
-         exit(1);
-     }
-
-     res = cudaGraphicsMapResources(1, &tex_res, 0);
-     if (res != cudaSuccess) {
-         printf("ERROR: %s: %s\n", cudaGetErrorName(res), cudaGetErrorString(res));
-         exit(1);
-     }
-
-     cudaArray* cuda_arr;
-     res = cudaGraphicsSubResourceGetMappedArray(&cuda_arr, tex_res, 0, 0);
-     if (res != cudaSuccess) {
-         printf("ERROR: %s: %s\n", cudaGetErrorName(res), cudaGetErrorString(res));
-         exit(1);
-     }
-
-    res = cudaMemcpyToArray(cuda_arr, 0, 0, cuda_buf, size_bytes, cudaMemcpyDeviceToDevice);
+    cudaGraphicsResource* tex_res;
+    res = cudaGraphicsGLRegisterImage(&tex_res, tex, GL_TEXTURE_2D, cudaGraphicsRegisterFlagsSurfaceLoadStore);
     if (res != cudaSuccess) {
         printf("ERROR: %s: %s\n", cudaGetErrorName(res), cudaGetErrorString(res));
         exit(1);
     }
 
-     res = cudaGraphicsUnmapResources(1, &tex_res, 0);
-     if (res != cudaSuccess) {
-         printf("ERROR: %s: %s\n", cudaGetErrorName(res), cudaGetErrorString(res));
-         exit(1);
-     }
+    res = cudaGraphicsMapResources(1, &tex_res, 0);
+    if (res != cudaSuccess) {
+        printf("ERROR: %s: %s\n", cudaGetErrorName(res), cudaGetErrorString(res));
+        exit(1);
+    }
 
-    while (!glfwWindowShouldClose(window))
-    {
+    cudaArray* cuda_arr;
+    res = cudaGraphicsSubResourceGetMappedArray(&cuda_arr, tex_res, 0, 0);
+    if (res != cudaSuccess) {
+        printf("ERROR: %s: %s\n", cudaGetErrorName(res), cudaGetErrorString(res));
+        exit(1);
+    }
+    
+    unsigned char* cpu_buf = (unsigned char*)malloc(size_bytes);
+    cpu_init(cpu_buf, 128, 128);
+
+    res = cudaMemcpy(cuda_buf[1], cpu_buf, size_bytes, cudaMemcpyHostToDevice);
+    if (res != cudaSuccess) {
+      printf("ERROR: %s: %s\n", cudaGetErrorName(res), cudaGetErrorString(res));
+      exit(1);
+    }
+
+    cuda_init<<<blocks, threads>>>(cuda_buf[1], 128, 128);
+
+    res = cudaPeekAtLastError();
+    if (res != cudaSuccess) {
+        printf("ERROR: %s: %s\n", cudaGetErrorName(res), cudaGetErrorString(res));
+        exit(1);
+    }
+    
+    const float fixed_fps = 60.f;
+    
+    int frame_number = 0;
+    
+    while (!glfwWindowShouldClose(window)) {
+        const auto beg_time = std::chrono::steady_clock::now();
+
+        if (frame_number % 5 == 0) {
+          std::swap(cuda_buf[0], cuda_buf[1]);
+          cuda_frame<<<blocks, threads>>>(cuda_buf[0], cuda_buf[1], 128, 128);
+
+          res = cudaPeekAtLastError();
+          if (res != cudaSuccess) {
+            printf("ERROR: %s: %s\n", cudaGetErrorName(res), cudaGetErrorString(res));
+            exit(1);
+          }
+
+          res = cudaMemcpyToArray(cuda_arr, 0, 0, cuda_buf[1], size_bytes, cudaMemcpyDeviceToDevice);
+          if (res != cudaSuccess) {
+            printf("ERROR: %s: %s\n", cudaGetErrorName(res), cudaGetErrorString(res));
+            exit(1);
+          }
+        }
+
         int width, height;
         glfwGetFramebufferSize(window, &width, &height);
 
@@ -231,10 +348,22 @@ int main(void)
         glBindTexture(GL_TEXTURE_2D, tex);
 
         glUseProgram(program);
-        glDrawArrays(GL_TRIANGLES, 0, 3);
+        glDrawArrays(GL_TRIANGLES, 0, 6);
 
         glfwSwapBuffers(window);
         glfwPollEvents();
+        
+        const auto end_time = std::chrono::steady_clock::now();
+        const auto dt = end_time - beg_time;
+        
+        const auto sleep_dur = std::chrono::duration<float>{1.f / fixed_fps} - dt; std::this_thread::sleep_for(sleep_dur);
+        frame_number += 1;
+    }
+
+    res = cudaGraphicsUnmapResources(1, &tex_res, 0);
+    if (res != cudaSuccess) {
+        printf("ERROR: %s: %s\n", cudaGetErrorName(res), cudaGetErrorString(res));
+        exit(1);
     }
 
     glfwDestroyWindow(window);
