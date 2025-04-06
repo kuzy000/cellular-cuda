@@ -1,4 +1,8 @@
 
+#include "cellular.cuh"
+#include "common.cuh"
+#include "imgui.h"
+
 constexpr float PI = 3.141592654f;
 
 __host__ __device__ int mod(int a, int b) {
@@ -176,4 +180,53 @@ __global__ void cuda_val_to_col(float* in, unsigned char* out, int w, int h) {
   out[res_i + 1] = res;
   out[res_i + 2] = res;
   out[res_i + 3] = 255;
+}
+
+bool Cellular::init(unsigned char* gpu_texture_, int w_, int h_) {
+  gpu_texture = gpu_texture_;
+  w = w_;
+  h = h_;
+
+  blocks = dim3{w / threads.x, h / threads.y};
+
+  CUDA_CALL(cudaMalloc(&cuda_buf[0], w * h * sizeof(float)));
+  CUDA_CALL(cudaMalloc(&cuda_buf[1], w * h * sizeof(float)));
+
+  float* cpu_buf = (float*)malloc(w * h * sizeof(float));
+  cpu_init(cpu_buf, w, h);
+
+  CUDA_CALL(cudaMemcpy(cuda_buf[1], cpu_buf, w * h * sizeof(float), cudaMemcpyHostToDevice));
+
+  CUDA_KERNEL(cuda_init<<<blocks, threads>>>(cuda_buf[1], w, h));
+
+  return true;
+}
+
+bool Cellular::term() {
+  return true;
+}
+
+bool Cellular::update() {
+
+  if (show_demo_window) {
+    ImGui::ShowDemoWindow(&show_demo_window);
+  }
+
+  {
+    ImGui::Begin("Settings");
+    
+    const auto& io = ImGui::GetIO();
+    ImGui::Text("%.1f FPS (%.3f ms/frame)", io.Framerate, 1000.0f / io.Framerate);
+
+    ImGui::Checkbox("ImGui Demo Window", &show_demo_window);
+
+    ImGui::SliderFloat("dt", &config.dt, 0.0f, 1.0f);
+    ImGui::End();
+  }
+
+  std::swap(cuda_buf[0], cuda_buf[1]);
+  CUDA_KERNEL(cuda_frame<<<blocks, threads>>>(cuda_buf[0], cuda_buf[1], w, h));
+  CUDA_KERNEL(cuda_val_to_col<<<blocks, threads>>>(cuda_buf[1], gpu_texture, w, h));
+
+  return true;
 }

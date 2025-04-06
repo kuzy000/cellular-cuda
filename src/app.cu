@@ -1,6 +1,6 @@
 #include "app.cuh"
 
-#include "cellular.cuh"
+#include "common.cuh"
 
 #include <GLFW/glfw3.h>
 #include <stdio.h>
@@ -54,17 +54,31 @@ bool App::init() {
     return false;
   }
 
-  glfwSetKeyCallback(window, [](GLFWwindow* window, int key, int scancode, int action, int mods) {
-    if (key == GLFW_KEY_ESCAPE && action == GLFW_PRESS) {
-      glfwSetWindowShouldClose(window, GLFW_TRUE);
-    }
-  });
-
   glfwMakeContextCurrent(window);
   const int gl_ver = gladLoadGL(glfwGetProcAddress);
   printf("INFO: GL version: %d.%d\n", GLAD_VERSION_MAJOR(gl_ver),
          GLAD_VERSION_MINOR(gl_ver));
   glfwSwapInterval(1);
+
+  IMGUI_CHECKVERSION();
+  ImGui::CreateContext();
+  ImGuiIO& io = ImGui::GetIO();
+  io.ConfigFlags |= ImGuiConfigFlags_NavEnableKeyboard; // Enable Keyboard Controls
+  io.ConfigFlags |= ImGuiConfigFlags_NavEnableGamepad;  // Enable Gamepad Controls
+
+  ImGui::StyleColorsDark();
+
+  ImGui_ImplGlfw_InitForOpenGL(window, true);
+  if (!ImGui_ImplOpenGL3_Init("#version 130")) {
+    printf("ERROR: Failed to ImGui_ImplOpenGL3_Init\n");
+    return false;
+  }
+
+  glfwSetKeyCallback(window, [](GLFWwindow* window, int key, int scancode, int action, int mods) {
+    if (key == GLFW_KEY_ESCAPE && action == GLFW_PRESS) {
+      glfwSetWindowShouldClose(window, GLFW_TRUE);
+    }
+  });
 
   static const struct Vertex {
     float x, y;
@@ -122,11 +136,7 @@ bool App::init() {
   glEnableVertexAttribArray(1);
   glVertexAttribPointer(1, 2, GL_FLOAT, GL_FALSE, sizeof(vertices[0]), (const void*)offsetof(Vertex, u));
 
-  CUDA_CALL(cudaMalloc(&cuda_buf[0], size_bytes));
-
-  CUDA_CALL(cudaMalloc(&cuda_buf[1], size_bytes));
-
-  CUDA_CALL(cudaMalloc(&cuda_tex, tex_bytes));
+  CUDA_CALL(cudaMalloc(&cuda_tex, w * h * 4));
 
   blocks = dim3{w / threads.x, h / threads.y};
 
@@ -143,18 +153,20 @@ bool App::init() {
 
   CUDA_CALL(cudaGraphicsSubResourceGetMappedArray(&cuda_arr, tex_res, 0, 0));
 
-  float* cpu_buf = (float*)malloc(size_bytes);
-  cpu_init(cpu_buf, w, h);
-
-  CUDA_CALL(cudaMemcpy(cuda_buf[1], cpu_buf, size_bytes, cudaMemcpyHostToDevice));
-
-  CUDA_KERNEL(cuda_init<<<blocks, threads>>>(cuda_buf[1], w, h));
+  cellular.init(cuda_tex, w, h);
 
   return true;
 }
 
 bool App::term() {
+  cellular.term();
+
   CUDA_CALL(cudaGraphicsUnmapResources(1, &tex_res, 0));
+
+  // Cleanup
+  ImGui_ImplOpenGL3_Shutdown();
+  ImGui_ImplGlfw_Shutdown();
+  ImGui::DestroyContext();
 
   glfwDestroyWindow(window);
   glfwTerminate();
@@ -163,17 +175,22 @@ bool App::term() {
 }
 
 bool App::loop() {
+  ImGuiIO& io = ImGui::GetIO();
+
   while (!glfwWindowShouldClose(window)) {
     const double beg_time = glfwGetTime();
 
-    if (frame_number % 1 == 0) {
-      std::swap(cuda_buf[0], cuda_buf[1]);
-      CUDA_KERNEL(cuda_frame<<<blocks, threads>>>(cuda_buf[0], cuda_buf[1], w, h));
+    glfwPollEvents();
 
-      CUDA_KERNEL(cuda_val_to_col<<<blocks, threads>>>(cuda_buf[1], cuda_tex, w, h));
+    // Start the Dear ImGui frame
+    ImGui_ImplOpenGL3_NewFrame();
+    ImGui_ImplGlfw_NewFrame();
+    ImGui::NewFrame();
 
-      CUDA_CALL(cudaMemcpyToArray(cuda_arr, 0, 0, cuda_tex, tex_bytes, cudaMemcpyDeviceToDevice));
-    }
+    cellular.update();
+
+    CUDA_CALL(cudaMemcpyToArray(cuda_arr, 0, 0, cuda_tex, w * h * 4, cudaMemcpyDeviceToDevice));
+    ImGui::Render();
 
     int width, height;
     glfwGetFramebufferSize(window, &width, &height);
@@ -187,14 +204,14 @@ bool App::loop() {
     glUseProgram(shader_prog);
     glDrawArrays(GL_TRIANGLES, 0, 6);
 
+    ImGui_ImplOpenGL3_RenderDrawData(ImGui::GetDrawData());
+
     glfwSwapBuffers(window);
-    glfwPollEvents();
 
     const double end_time = glfwGetTime();
     const double dt = end_time - beg_time;
 
     usleep(dt * 1e6);
-    frame_number += 1;
   }
 
   return true;

@@ -1,28 +1,13 @@
 #pragma once
 
-#include "glad/gl.h"
+#include <glad/gl.h>
 #define GLFW_INCLUDE_NONE
 #include <GLFW/glfw3.h>
 #include <cuda_gl_interop.h>
+#include <imgui_impl_glfw.h>
+#include <imgui_impl_opengl3.h>
 
-#define CUDA_CALL(f)                                                                            \
-  do {                                                                                          \
-    const cudaError_t res = f;                                                                  \
-    if (res != cudaSuccess) {                                                                   \
-      printf("ERROR: Calling " #f " %s: %s\n", cudaGetErrorName(res), cudaGetErrorString(res)); \
-      return false;                                                                             \
-    }                                                                                           \
-  } while (false)
-
-#define CUDA_KERNEL(...)                                                                                  \
-  do {                                                                                                    \
-    __VA_ARGS__;                                                                                          \
-    const cudaError_t res = cudaPeekAtLastError();                                                        \
-    if (res != cudaSuccess) {                                                                             \
-      printf("ERROR: Calling " #__VA_ARGS__ " %s: %s\n", cudaGetErrorName(res), cudaGetErrorString(res)); \
-      return false;                                                                                       \
-    }                                                                                                     \
-  } while (false)
+#include "cellular.cuh"
 
 class App {
 public:
@@ -47,16 +32,11 @@ private:
   const int w = 1024;
   const int h = 1024;
 
-  const int tex_bytes = w * h * 4;
-  const int size_bytes = w * h * sizeof(float);
-
   unsigned char* cuda_tex;
-  float* cuda_buf[2];
-  float* cpu_buf;
-
   const float fixed_fps = 60.f;
-  int frame_number = 0;
 
   const dim3 threads{16, 16};
   dim3 blocks;
+  
+  Cellular cellular;
 };
