@@ -4,5 +4,5 @@ CompileFlags:
   - --cuda-path=/opt/cuda
   - --cuda-gpu-arch=sm_52
   - -I/opt/cuda/include
-  - -Iglad/include
-  - -Ithirdparty
+  - -Ithirdparty/glad/include
+  - -Ithirdparty/glm/include
