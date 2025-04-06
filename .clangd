@@ -1,2 +1,8 @@
 CompileFlags:
-  Add: [-I, glad/include]
+  Add: 
+  - -xcuda
+  - --cuda-path=/opt/cuda
+  - --cuda-gpu-arch=sm_52
+  - -I/opt/cuda/include
+  - -Iglad/include
+  - -Ithirdparty
