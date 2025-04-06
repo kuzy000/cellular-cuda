@@ -11,7 +11,7 @@ override CFLAGS += -I thirdparty/glm/include
 override CFLAGS += -lGL -lglfw
 
 main: thirdparty/glad
-	nvcc $(CFLAGS) -o main main.cu thirdparty/glad/src/gl.c
+	nvcc $(CFLAGS) -o main src/main.cu thirdparty/glad/src/gl.c
 
 thirdparty/glad:
 	glad --api gl:core --out-path thirdparty/glad c
