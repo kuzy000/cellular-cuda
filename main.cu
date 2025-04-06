@@ -1,11 +1,14 @@
+#include <algorithm>
 #include <cstddef>
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <glad/gl.h>
 #include <utility>
 #define GLFW_INCLUDE_NONE
 #include <GLFW/glfw3.h>
 #include <cuda_gl_interop.h>
+#include <curand.h>
 
 #include <stdlib.h>
 #include <stdio.h>
@@ -13,6 +16,9 @@
 
 #include <chrono>
 #include <thread>
+
+
+constexpr float PI = 3.141592654f;
 
 static const struct Vertex
 {
@@ -68,103 +74,182 @@ static void key_callback(GLFWwindow* window, int key, int scancode, int action, 
         glfwSetWindowShouldClose(window, GLFW_TRUE);
 }
 
-__host__ __device__ bool get_cell(unsigned char* buf, int x, int y, int w, int h) {
-    const int i = (y * w + x) * 4;
-    return buf[i] > 0;
-}
-
-__host__ __device__ void set_cell(unsigned char* buf, int x, int y, int w, int h, bool val) {
-    const int i = (y * w + x) * 4;
-    const int v = val ? 255 : 0;
-    buf[i + 0] = v;
-    buf[i + 1] = v;
-    buf[i + 2] = v;
-    buf[i + 3] = v;
-}
-
 __host__ __device__ int mod(int a, int b) {
     const int r = a % b;
     return r >= 0 ? r : r + b;
 }
 
-void cpu_init(unsigned char* out, int w, int h) {
+void cpu_init(float* out, int w, int h) {
     memset(out, 0, w * h * 4);
     
-    const char* data = R"game(
-    
+    for (int i = 0; i < w * h; ++i) {
+        float x = i % w;
+        float y = int(i / w);
+        
+        x /= w;
+        y /= h;
 
-.........................x
-.......................x.x
-.............xx......xx............xx
-............x...x....xx............xx
-.xx........x.....x...xx
-.xx........x...x.xx....x.x
-...........x.....x.......x
-............x...x
-.............xx..
-)game";
-    
-    const int start_x = 20;
-    int x = start_x;
-    int y = 100;
-    
-    while (*data != '\0') {
-        if (*data == 'x') {
-            set_cell(out, x, y, w, h, true);
-        }
-        
-        if (*data == '\n') {
-            y -= 1; 
-            x = start_x;
-        }
-        
-        x += 1;
-        data += 1;
+        out[i] = x * y;
     }
 }
 
-__global__ void cuda_init(unsigned char* out, int w, int h)
+__global__ void cuda_init(float* out, int w, int h)
 {
     return;
-
-    const int x = blockIdx.x * blockDim.x + threadIdx.x;
-    const int y = blockIdx.y * blockDim.y + threadIdx.y;
-    
-    const int i = (y * w + x) * 4;
-
-    float t0 = (float)x / w;
-    float t1 = (float)y / h;
-
-    out[i + 0] = t0 * 255;
-    out[i + 1] = 0;
-    out[i + 2] = t1 * 255;
-    out[i + 3] = 255;
 }
 
-__global__ void cuda_frame(unsigned char* in, unsigned char* out, int w, int h)
+__host__ __device__ int idx(int x, int y, int w, int h) {
+    return mod(y, h) * w + mod(x, w);
+}
+
+__host__ __device__ float sigmoid_a(float x, float a, float b) {
+    return 1.0 / (1.0 + exp(-(x - a) * 4.0 / b));
+}
+
+__host__ __device__ float sigmoid_b(float x, float b, float eb) {
+    return 1.0 - sigmoid_a(x, b, eb);
+}
+
+__host__ __device__ float sigmoid_ab(float x, float a, float b, float ea, float eb) {
+    return sigmoid_a(x, a, ea) * sigmoid_b(x, b, eb);
+}
+
+__host__ __device__ float sigmoid_mix(float x, float y, float m, float em) {
+    return x * (1.0 - sigmoid_a(m, 0.5, em)) + y * sigmoid_a(m, 0.5, em);
+}
+
+// From https://www.shadertoy.com/view/XtdSDn#
+__host__ __device__ float trans_shadertoy(float inner, float outer) {
+    // n - outer
+    // m - inner
+    const float b1 = 0.257f;
+    const float b2 = 0.336f;
+    const float d1 = 0.365f;
+    const float d2 = 0.549f;
+    const float alpha_outer = 0.028f;
+    const float alpha_inner = 0.147f;
+    const float alpha_n = alpha_outer;
+    const float alpha_m = alpha_inner;
+    
+    const float n = outer;
+    const float m = inner;
+
+    return sigmoid_mix(sigmoid_ab(n, b1, b2, alpha_n, alpha_n),
+                       sigmoid_ab(n, d1, d2, alpha_n, alpha_n), m, alpha_m
+                      );
+}
+
+__host__ __device__ float sigmoid1(float x, float a, float alpha) {
+    return 1.0 / (1.0 + exp(-(x - a) * 4.0 / alpha));
+}
+
+
+__host__ __device__ float sigmoid2(float x, float a, float b, float alpha) {
+    return sigmoid1(x, a, alpha) * (1. - sigmoid1(x, b, alpha));
+}
+
+__host__ __device__ float sigmoidm(float x, float y, float m, float alpha) {
+    return x * (1. - sigmoid1(m, .5f, alpha)) + y * sigmoid1(m, .5f, alpha);
+}
+
+// From Smooth Life paper
+__host__ __device__ float trans_paper(float inner, float outer) {
+    // n - outer
+    // m - inner
+    const float b1 = 0.278f;
+    const float b2 = 0.365f;
+    const float d1 = 0.267f;
+    const float d2 = 0.445f;
+    const float alpha_outer = 0.028f;
+    const float alpha_inner = 0.147f;
+    const float s1 = sigmoidm(b1, d1, inner, alpha_inner);
+    const float s2 = sigmoidm(b2, d2, inner, alpha_inner);
+
+    return sigmoid2(outer, s1, s2, alpha_outer);
+}
+
+__device__ float saturate(float v) {
+    if (v < 0.f) { return 0.f; }
+    if (v > 1.f) { return 1.f; }
+    return v;
+}
+
+__global__ void cuda_frame(float* in, float* out, int w, int h)
+{
+    const int x = blockIdx.x * blockDim.x + threadIdx.x;
+    const int y = blockIdx.y * blockDim.y + threadIdx.y;
+
+    const float r_outer = 10.f;
+    const float r_inner = 3.f;
+
+    const float area_inner = PI * r_inner * r_inner;
+    const float area_outer = PI * r_outer * r_outer - area_inner; // ring
+
+    const float aliasing_width = 1.f;
+
+    float inner_val = 0.f;
+    float outer_val = 0.f;
+
+    for (float offset_x = -r_outer; offset_x <= r_outer; offset_x += 1.f) {
+        for (float offset_y = -r_outer; offset_y <= r_outer; offset_y += 1.f) {
+            // TODO: try comparing squared values
+            const float r = sqrt(offset_x * offset_x + offset_y * offset_y);
+
+            const float cx = x + offset_x;
+            const float cy = y + offset_y;
+
+            const float val = in[idx(cx, cy, w, h)];
+
+            // Smoothlife paper
+            //if (0) {
+            //} else if (r < r_inner - aliasing_width * .5f) {
+            //    inner_val += val;
+            //} else if (r < r_inner + aliasing_width * .5f) {
+            //    inner_val += val * (r_inner + aliasing_width * .5f - r) / aliasing_width;
+            //} else if (r < r_outer - aliasing_width * .5f) {
+            //    outer_val += val;
+            //} else if (r < r_outer + aliasing_width * .5f) {
+            //    outer_val += val * (r_outer + aliasing_width * .5f - r) / aliasing_width;
+            //}
+            
+            // Shadertoy
+            outer_val += val * saturate(r - r_inner + .5) * (1.f - saturate(r - r_outer + .5f));
+            inner_val += val * (1.f - saturate(r - r_inner + .5f));
+        }
+    }
+    
+    inner_val /= area_inner;
+    outer_val /= area_outer;
+    
+    const float dt = .30f;
+    const float prev = in[idx(x, y, w, h)];
+    float res = prev + dt * (trans_shadertoy(inner_val, outer_val) * 2.f - 1.f);
+    
+    if (res < 0.f) {
+        res = 0.f;
+    }
+
+    if (res > 1.f) {
+        res = 1.f;
+    }
+
+    out[idx(x, y, w, h)] = res;
+}
+
+__global__ void cuda_val_to_col(float* in, unsigned char* out, int w, int h)
 {
     const int x = blockIdx.x * blockDim.x + threadIdx.x;
     const int y = blockIdx.y * blockDim.y + threadIdx.y;
     
-    int n = 0;
-    n += get_cell(in, mod(x - 1, w), mod(y - 1, h), w, h);
-    n += get_cell(in, mod(x - 0, w), mod(y - 1, h), w, h);
-    n += get_cell(in, mod(x + 1, w), mod(y - 1, h), w, h);
+    const int i = y * w + x;
+    const int res_i = (y * w + x) * 4;
 
-    n += get_cell(in, mod(x - 1, w), mod(y - 0, h), w, h);
-    //n += get_cell(in, mod(x - 0, w), mod(y - 0, h), w, h);
-    n += get_cell(in, mod(x + 1, w), mod(y - 0, h), w, h);
-    
-    n += get_cell(in, mod(x - 1, w), mod(y + 1, h), w, h);
-    n += get_cell(in, mod(x - 0, w), mod(y + 1, h), w, h);
-    n += get_cell(in, mod(x + 1, w), mod(y + 1, h), w, h);
-    
-    if (get_cell(in, x, y, w, h)) {
-        set_cell(out, x, y, w, h, n >= 2 && n <= 3);
-    }
-    else {
-        set_cell(out, x, y, w, h, n == 3);
-    }
+    const int res = in[i] * 255;
+
+    out[res_i + 0] = res;
+    out[res_i + 1] = res;
+    out[res_i + 2] = res;
+    out[res_i + 3] = 255;
 }
 
 int main(void)
@@ -243,10 +328,16 @@ int main(void)
 
 
     cudaError_t res;
-
-    const int size_bytes = 128 * 128 * 4;
     
-    unsigned char* cuda_buf[2];
+    const int w = 1024;
+    const int h = 1024;
+
+    const int size_bytes = w * h * sizeof(float);
+
+    unsigned char* cuda_tex;
+    const int tex_bytes = w * h * 4;
+
+    float* cuda_buf[2];
     res = cudaMalloc(&cuda_buf[0], size_bytes);
     if (res != cudaSuccess) {
         printf("ERROR: %s: %s\n", cudaGetErrorName(res), cudaGetErrorString(res));
@@ -259,7 +350,13 @@ int main(void)
         exit(1);
     }
     
-    const dim3 image_size{128, 128};
+    res = cudaMalloc(&cuda_tex, tex_bytes);
+    if (res != cudaSuccess) {
+        printf("ERROR: %s: %s\n", cudaGetErrorName(res), cudaGetErrorString(res));
+        exit(1);
+    }
+
+    const dim3 image_size{w, h};
     
     const dim3 threads{16, 16};
     const dim3 blocks{
@@ -272,7 +369,7 @@ int main(void)
     glGenTextures(1, &tex);
     glBindTexture(GL_TEXTURE_2D, tex);
 
-    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, 128, 128, 0, GL_RGBA, GL_UNSIGNED_BYTE, nullptr);
+    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, w, h, 0, GL_RGBA, GL_UNSIGNED_BYTE, nullptr);
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
 
@@ -297,8 +394,8 @@ int main(void)
         exit(1);
     }
     
-    unsigned char* cpu_buf = (unsigned char*)malloc(size_bytes);
-    cpu_init(cpu_buf, 128, 128);
+    float* cpu_buf = (float*)malloc(size_bytes);
+    cpu_init(cpu_buf, w, h);
 
     res = cudaMemcpy(cuda_buf[1], cpu_buf, size_bytes, cudaMemcpyHostToDevice);
     if (res != cudaSuccess) {
@@ -306,7 +403,7 @@ int main(void)
       exit(1);
     }
 
-    cuda_init<<<blocks, threads>>>(cuda_buf[1], 128, 128);
+    cuda_init<<<blocks, threads>>>(cuda_buf[1], w, h);
 
     res = cudaPeekAtLastError();
     if (res != cudaSuccess) {
@@ -321,9 +418,9 @@ int main(void)
     while (!glfwWindowShouldClose(window)) {
         const auto beg_time = std::chrono::steady_clock::now();
 
-        if (frame_number % 5 == 0) {
+        if (frame_number % 1 == 0) {
           std::swap(cuda_buf[0], cuda_buf[1]);
-          cuda_frame<<<blocks, threads>>>(cuda_buf[0], cuda_buf[1], 128, 128);
+          cuda_frame<<<blocks, threads>>>(cuda_buf[0], cuda_buf[1], w, h);
 
           res = cudaPeekAtLastError();
           if (res != cudaSuccess) {
@@ -331,7 +428,9 @@ int main(void)
             exit(1);
           }
 
-          res = cudaMemcpyToArray(cuda_arr, 0, 0, cuda_buf[1], size_bytes, cudaMemcpyDeviceToDevice);
+          cuda_val_to_col<<<blocks, threads>>>(cuda_buf[1], cuda_tex, w, h);
+
+          res = cudaMemcpyToArray(cuda_arr, 0, 0, cuda_tex, tex_bytes, cudaMemcpyDeviceToDevice);
           if (res != cudaSuccess) {
             printf("ERROR: %s: %s\n", cudaGetErrorName(res), cudaGetErrorString(res));
             exit(1);
@@ -356,7 +455,8 @@ int main(void)
         const auto end_time = std::chrono::steady_clock::now();
         const auto dt = end_time - beg_time;
         
-        const auto sleep_dur = std::chrono::duration<float>{1.f / fixed_fps} - dt; std::this_thread::sleep_for(sleep_dur);
+        const auto sleep_dur = std::chrono::duration<float>{1.f / fixed_fps} - dt; 
+        std::this_thread::sleep_for(sleep_dur);
         frame_number += 1;
     }
 
