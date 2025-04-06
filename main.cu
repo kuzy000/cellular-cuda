@@ -1,24 +1,20 @@
-#include "cellular.cu"
 #include "app.cu"
+#include "cellular.cu"
 
-#include <cstdlib>
+int main(void) {
+  App app;
 
-int main(void)
-{
-    App app;
-    
-    if (!app.init()) {
-        return EXIT_FAILURE;
-    }
-    
-    if (!app.loop()) {
-        return EXIT_FAILURE;
-    }
-    
-    if (!app.term()) {
-        return EXIT_FAILURE;
-    }
-    
-    return EXIT_SUCCESS;
+  if (!app.init()) {
+    return 1;
+  }
+
+  if (!app.loop()) {
+    return 1;
+  }
+
+  if (!app.term()) {
+    return 1;
+  }
+
+  return 0;
 }
-

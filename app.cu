@@ -2,9 +2,9 @@
 
 #include "cellular.cuh"
 
-#include <chrono>
+#include <GLFW/glfw3.h>
 #include <stdio.h>
-#include <thread>
+#include <unistd.h>
 
 static const char* vertex_shader_text = R"glsl(
 #version 330 core
@@ -137,7 +137,6 @@ bool App::init() {
   glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
   glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
 
-  cudaGraphicsResource* tex_res;
   CUDA_CALL(cudaGraphicsGLRegisterImage(&tex_res, texture, GL_TEXTURE_2D, cudaGraphicsRegisterFlagsSurfaceLoadStore));
 
   CUDA_CALL(cudaGraphicsMapResources(1, &tex_res, 0));
@@ -164,14 +163,12 @@ bool App::term() {
 }
 
 bool App::loop() {
-  cudaError_t res;
   while (!glfwWindowShouldClose(window)) {
-    const auto beg_time = std::chrono::steady_clock::now();
+    const double beg_time = glfwGetTime();
 
     if (frame_number % 1 == 0) {
       std::swap(cuda_buf[0], cuda_buf[1]);
       CUDA_KERNEL(cuda_frame<<<blocks, threads>>>(cuda_buf[0], cuda_buf[1], w, h));
-
 
       CUDA_KERNEL(cuda_val_to_col<<<blocks, threads>>>(cuda_buf[1], cuda_tex, w, h));
 
@@ -193,11 +190,10 @@ bool App::loop() {
     glfwSwapBuffers(window);
     glfwPollEvents();
 
-    const auto end_time = std::chrono::steady_clock::now();
-    const auto dt = end_time - beg_time;
+    const double end_time = glfwGetTime();
+    const double dt = end_time - beg_time;
 
-    const auto sleep_dur = std::chrono::duration<float>{1.f / fixed_fps} - dt;
-    std::this_thread::sleep_for(sleep_dur);
+    usleep(dt * 1e6);
     frame_number += 1;
   }
 

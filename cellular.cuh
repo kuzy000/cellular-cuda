@@ -21,7 +21,6 @@ __host__ __device__ float trans_shadertoy(float inner, float outer);
 
 __host__ __device__ float sigmoid1(float x, float a, float alpha);
 
-
 __host__ __device__ float sigmoid2(float x, float a, float b, float alpha);
 
 __host__ __device__ float sigmoidm(float x, float y, float m, float alpha);

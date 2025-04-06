@@ -1,7 +1,17 @@
+.PHONY: main
 
-main: glad main.cu
-	nvcc -lineinfo -O3 -Xptxas -O3 -std=c++20 -g -I thirdparty/ -I glad/include -lGL -lglfw -o main main.cu glad/src/gl.c
+override CFLAGS += -std=c++20
+override CFLAGS += -arch=native
+override CFLAGS += -Xcompiler -fno-exceptions,-static-libgcc,-static-libstdc++
+override CFLAGS += -lineinfo -g -Xptxas -O3
 
+override CFLAGS += -I thirdparty/glad/include
+override CFLAGS += -I thirdparty/glm/include
 
-glad: glad
-	glad --api gl:core --out-path glad c
+override CFLAGS += -lGL -lglfw
+
+main: thirdparty/glad
+	nvcc $(CFLAGS) -o main main.cu thirdparty/glad/src/gl.c
+
+thirdparty/glad:
+	glad --api gl:core --out-path thirdparty/glad c
