@@ -66,11 +66,11 @@ template <typename T>
 struct GpuSlice {
   T* ptr;
   size_t len;
-  
+
   static GpuSlice<T> alloc(size_t len) {
-    return GpuSlice<T> {alloc_gpu<T>(len), len};
+    return GpuSlice<T>{alloc_gpu<T>(len), len};
   }
-  
+
   void copy_from(GpuSlice<T> val) {
     assert(val.len == len);
     CUDA_ABORT(cudaMemcpy(ptr, val.ptr, sizeof(T) * len, cudaMemcpyDeviceToDevice));
@@ -88,7 +88,7 @@ struct CpuSlice {
   size_t len;
 
   static CpuSlice<T> alloc(size_t len) {
-    return CpuSlice<T> {alloc_cpu<T>(len), len};
+    return CpuSlice<T>{alloc_cpu<T>(len), len};
   }
 
   void copy_from(GpuSlice<T> val) {
@@ -101,3 +101,9 @@ struct CpuSlice {
     CUDA_ABORT(cudaMemcpy(ptr, val.ptr, sizeof(T) * len, cudaMemcpyHostToHost));
   }
 };
+
+// No, I'm not ashamed
+template <typename T, typename V>
+T as(V&& v) {
+  return static_cast<T>(v);
+}

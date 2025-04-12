@@ -1,5 +1,6 @@
 #include "cellular.cuh"
 #include "imgui.h"
+#include <cstdio>
 #include <cstdlib>
 
 constexpr float PI = 3.141592654f;
@@ -24,6 +25,24 @@ void cpu_init(float* out, int w, int h) {
 }
 
 __global__ void cuda_init(float* out, int w, int h) {
+  return;
+}
+
+__global__ void cuda_draw(float* out, int w, int h, int px, int py, float draw_val) {
+  const int x = blockIdx.x * blockDim.x + threadIdx.x;
+  const int y = blockIdx.y * blockDim.y + threadIdx.y;
+
+  const float dx = (x - px) / (float)w;
+  const float dy = (y - py) / (float)h;
+
+  const float r = 0.05f;
+
+  const float v = dx * dx + dy * dy;
+  if (v < r * r) {
+    // out[idx(x, y, w, h)] = 1.f - v / (r * r) + 0.5f;
+    out[idx(x, y, w, h)] = draw_val;
+  }
+
   return;
 }
 
@@ -229,11 +248,12 @@ bool Cellular::update() {
     ImGui::DragFloatRange2("death", &config.d1, &config.d2, .001f, 0.f, 1.f);
     ImGui::SliderFloat("alpha_outer", &config.alpha_outer, 0.f, 1.f);
     ImGui::SliderFloat("alpha_inner", &config.alpha_inner, 0.f, 1.f);
-    
+    ImGui::SliderFloat("draw_value", &config.draw_value, 0.f, 1.f);
+
     if (ImGui::Button("Reset")) {
       cuda_buf[1].copy_from(cpu_buf);
     }
-    
+
     ImGui::End();
   }
 
@@ -243,5 +263,10 @@ bool Cellular::update() {
   CUDA_KERNEL(cuda_frame<<<blocks, threads>>>(cuda_buf[0].ptr, cuda_buf[1].ptr, w, h, *config_gpu));
   CUDA_KERNEL(cuda_val_to_col<<<blocks, threads>>>(cuda_buf[1].ptr, gpu_texture, w, h));
 
+  return true;
+}
+
+bool Cellular::draw(int x, int y) {
+  CUDA_KERNEL(cuda_draw<<<blocks, threads>>>(cuda_buf[1].ptr, w, h, x, y, config.draw_value));
   return true;
 }

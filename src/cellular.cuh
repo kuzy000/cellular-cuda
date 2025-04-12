@@ -7,6 +7,7 @@ __host__ __device__ int mod(int a, int b);
 void cpu_init(float* out, int w, int h);
 
 __global__ void cuda_init(float* out, int w, int h);
+__global__ void cuda_draw(float* out, int w, int h, int x, int y);
 
 __host__ __device__ int idx(int x, int y, int w, int h);
 
@@ -26,7 +27,7 @@ __host__ __device__ float trans_paper(float inner, float outer);
 __device__ float saturate(float v);
 __global__ void cuda_frame(float* in, float* out, int w, int h);
 __global__ void cuda_val_to_col(float* in, unsigned char* out, int w, int h);
-  
+
 struct Config {
   float dt = 0.3f;
   float b1 = 0.257f;
@@ -35,6 +36,7 @@ struct Config {
   float d2 = 0.549f;
   float alpha_outer = 0.028f;
   float alpha_inner = 0.147f;
+  float draw_value = 1.f;
 };
 
 class Cellular {
@@ -42,6 +44,7 @@ public:
   bool init(unsigned char* gpu_texture, int w, int h);
   bool term();
   bool update();
+  bool draw(int x, int y);
 
 private:
   unsigned char* gpu_texture = nullptr;
@@ -53,7 +56,7 @@ private:
 
   const dim3 threads{16, 16};
   dim3 blocks;
-  
+
   bool show_demo_window = false;
 
   Config config;
