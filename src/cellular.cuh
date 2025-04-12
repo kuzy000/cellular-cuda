@@ -11,7 +11,7 @@ __global__ void cuda_draw(float* out, int w, int h, int x, int y);
 
 __host__ __device__ int idx(int x, int y, int w, int h);
 
-// From https://www.shadertoy.com/view/XtdSDn#
+// From https://www.shadertoy.com/view/XtdSDn
 __host__ __device__ float sigmoid_a(float x, float a, float b);
 __host__ __device__ float sigmoid_b(float x, float b, float eb);
 __host__ __device__ float sigmoid_ab(float x, float a, float b, float ea, float eb);
@@ -29,7 +29,10 @@ __global__ void cuda_frame(float* in, float* out, int w, int h);
 __global__ void cuda_val_to_col(float* in, unsigned char* out, int w, int h);
 
 struct Config {
-  float dt = 0.3f;
+  // n - outer
+  // m - inner
+
+  // Values from https://www.shadertoy.com/view/XtdSDn
   float b1 = 0.257f;
   float b2 = 0.336f;
   float d1 = 0.365f;
@@ -37,6 +40,18 @@ struct Config {
   float alpha_outer = 0.028f;
   float alpha_inner = 0.147f;
   float draw_value = 1.f;
+
+  // Values SmoothLife paper
+  // const float b1 = 0.278f;
+  // const float b2 = 0.365f;
+  // const float d1 = 0.267f;
+  // const float d2 = 0.445f;
+  // const float alpha_outer = 0.028f;
+  // const float alpha_inner = 0.147f;
+
+  float dt = 0.3f;
+  // The algo is also slightly different
+  bool is_paper;
 };
 
 class Cellular {

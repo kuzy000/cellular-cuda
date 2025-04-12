@@ -70,12 +70,6 @@ __host__ __device__ float sigmoid_mix(float x, float y, float m, float em) {
 __host__ __device__ float trans_shadertoy(Config& cfg, float inner, float outer) {
   // n - outer
   // m - inner
-  // const float b1 = 0.257f;
-  // const float b2 = 0.336f;
-  // const float d1 = 0.365f;
-  // const float d2 = 0.549f;
-  // const float alpha_outer = 0.028f;
-  // const float alpha_inner = 0.147f;
   const float alpha_n = cfg.alpha_outer;
   const float alpha_m = cfg.alpha_inner;
 
@@ -99,19 +93,13 @@ __host__ __device__ float sigmoidm(float x, float y, float m, float alpha) {
 }
 
 // From Smooth Life paper
-__host__ __device__ float trans_paper(float inner, float outer) {
+__host__ __device__ float trans_paper(Config& cfg, float inner, float outer) {
   // n - outer
   // m - inner
-  const float b1 = 0.278f;
-  const float b2 = 0.365f;
-  const float d1 = 0.267f;
-  const float d2 = 0.445f;
-  const float alpha_outer = 0.028f;
-  const float alpha_inner = 0.147f;
-  const float s1 = sigmoidm(b1, d1, inner, alpha_inner);
-  const float s2 = sigmoidm(b2, d2, inner, alpha_inner);
+  const float s1 = sigmoidm(cfg.b1, cfg.d1, inner, cfg.alpha_inner);
+  const float s2 = sigmoidm(cfg.b2, cfg.d2, inner, cfg.alpha_inner);
 
-  return sigmoid2(outer, s1, s2, alpha_outer);
+  return sigmoid2(outer, s1, s2, cfg.alpha_outer);
 }
 
 __device__ float saturate(float v) {
@@ -124,7 +112,7 @@ __device__ float saturate(float v) {
   return v;
 }
 
-__global__ void cuda_frame(float* in, float* out, int w, int h, Config& config) {
+__global__ void cuda_frame(Config& cfg, float* in, float* out, int w, int h) {
   const int x = blockIdx.x * blockDim.x + threadIdx.x;
   const int y = blockIdx.y * blockDim.y + threadIdx.y;
 
@@ -149,21 +137,23 @@ __global__ void cuda_frame(float* in, float* out, int w, int h, Config& config) 
 
       const float val = in[idx(cx, cy, w, h)];
 
-      // Smoothlife paper
-      // if (0) {
-      //} else if (r < r_inner - aliasing_width * .5f) {
-      //    inner_val += val;
-      //} else if (r < r_inner + aliasing_width * .5f) {
-      //    inner_val += val * (r_inner + aliasing_width * .5f - r) / aliasing_width;
-      //} else if (r < r_outer - aliasing_width * .5f) {
-      //    outer_val += val;
-      //} else if (r < r_outer + aliasing_width * .5f) {
-      //    outer_val += val * (r_outer + aliasing_width * .5f - r) / aliasing_width;
-      //}
-
-      // Shadertoy
-      outer_val += val * saturate(r - r_inner + .5) * (1.f - saturate(r - r_outer + .5f));
-      inner_val += val * (1.f - saturate(r - r_inner + .5f));
+      if (cfg.is_paper) {
+        const float aliasing_width = 1.f;
+        if (0) {
+        } else if (r < r_inner - aliasing_width * .5f) {
+          inner_val += val;
+        } else if (r < r_inner + aliasing_width * .5f) {
+          inner_val += val * (r_inner + aliasing_width * .5f - r) / aliasing_width;
+        } else if (r < r_outer - aliasing_width * .5f) {
+          outer_val += val;
+        } else if (r < r_outer + aliasing_width * .5f) {
+          outer_val += val * (r_outer + aliasing_width * .5f - r) / aliasing_width;
+        }
+      } else {
+        // Shadertoy
+        outer_val += val * saturate(r - r_inner + .5) * (1.f - saturate(r - r_outer + .5f));
+        inner_val += val * (1.f - saturate(r - r_inner + .5f));
+      }
     }
   }
 
@@ -172,7 +162,9 @@ __global__ void cuda_frame(float* in, float* out, int w, int h, Config& config) 
 
   const float dt = .30f;
   const float prev = in[idx(x, y, w, h)];
-  float res = prev + config.dt * (trans_shadertoy(config, inner_val, outer_val) * 2.f - 1.f);
+
+  const float factor = cfg.is_paper ? trans_paper(cfg, inner_val, outer_val) : trans_shadertoy(cfg, inner_val, outer_val);
+  float res = prev + cfg.dt * (factor * 2.f - 1.f);
 
   if (res < 0.f) {
     res = 0.f;
@@ -243,6 +235,13 @@ bool Cellular::update() {
 
     ImGui::Checkbox("ImGui Demo Window", &show_demo_window);
 
+    if (ImGui::RadioButton("Paper Algo", config.is_paper)) {
+      config.is_paper = true;
+    }
+    if (ImGui::RadioButton("Shadertoy Algo", !config.is_paper)) {
+      config.is_paper = false;
+    }
+
     ImGui::SliderFloat("dt", &config.dt, 0.0f, 1.0f);
     ImGui::DragFloatRange2("birth", &config.b1, &config.b2, .001f, 0.f, 1.f);
     ImGui::DragFloatRange2("death", &config.d1, &config.d2, .001f, 0.f, 1.f);
@@ -260,7 +259,7 @@ bool Cellular::update() {
   copy_to_gpu(config_gpu, &config);
 
   std::swap(cuda_buf[0], cuda_buf[1]);
-  CUDA_KERNEL(cuda_frame<<<blocks, threads>>>(cuda_buf[0].ptr, cuda_buf[1].ptr, w, h, *config_gpu));
+  CUDA_KERNEL(cuda_frame<<<blocks, threads>>>(*config_gpu, cuda_buf[0].ptr, cuda_buf[1].ptr, w, h));
   CUDA_KERNEL(cuda_val_to_col<<<blocks, threads>>>(cuda_buf[1].ptr, gpu_texture, w, h));
 
   return true;
