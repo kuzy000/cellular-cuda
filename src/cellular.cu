@@ -1,7 +1,6 @@
-
 #include "cellular.cuh"
-#include "common.cuh"
 #include "imgui.h"
+#include <cstdlib>
 
 constexpr float PI = 3.141592654f;
 
@@ -49,23 +48,23 @@ __host__ __device__ float sigmoid_mix(float x, float y, float m, float em) {
 }
 
 // From https://www.shadertoy.com/view/XtdSDn#
-__host__ __device__ float trans_shadertoy(float inner, float outer) {
+__host__ __device__ float trans_shadertoy(Config& cfg, float inner, float outer) {
   // n - outer
   // m - inner
-  const float b1 = 0.257f;
-  const float b2 = 0.336f;
-  const float d1 = 0.365f;
-  const float d2 = 0.549f;
-  const float alpha_outer = 0.028f;
-  const float alpha_inner = 0.147f;
-  const float alpha_n = alpha_outer;
-  const float alpha_m = alpha_inner;
+  // const float b1 = 0.257f;
+  // const float b2 = 0.336f;
+  // const float d1 = 0.365f;
+  // const float d2 = 0.549f;
+  // const float alpha_outer = 0.028f;
+  // const float alpha_inner = 0.147f;
+  const float alpha_n = cfg.alpha_outer;
+  const float alpha_m = cfg.alpha_inner;
 
   const float n = outer;
   const float m = inner;
 
-  return sigmoid_mix(sigmoid_ab(n, b1, b2, alpha_n, alpha_n),
-                     sigmoid_ab(n, d1, d2, alpha_n, alpha_n), m, alpha_m);
+  return sigmoid_mix(sigmoid_ab(n, cfg.b1, cfg.b2, alpha_n, alpha_n),
+                     sigmoid_ab(n, cfg.d1, cfg.d2, alpha_n, alpha_n), m, alpha_m);
 }
 
 __host__ __device__ float sigmoid1(float x, float a, float alpha) {
@@ -106,7 +105,7 @@ __device__ float saturate(float v) {
   return v;
 }
 
-__global__ void cuda_frame(float* in, float* out, int w, int h) {
+__global__ void cuda_frame(float* in, float* out, int w, int h, Config& config) {
   const int x = blockIdx.x * blockDim.x + threadIdx.x;
   const int y = blockIdx.y * blockDim.y + threadIdx.y;
 
@@ -154,7 +153,7 @@ __global__ void cuda_frame(float* in, float* out, int w, int h) {
 
   const float dt = .30f;
   const float prev = in[idx(x, y, w, h)];
-  float res = prev + dt * (trans_shadertoy(inner_val, outer_val) * 2.f - 1.f);
+  float res = prev + config.dt * (trans_shadertoy(config, inner_val, outer_val) * 2.f - 1.f);
 
   if (res < 0.f) {
     res = 0.f;
@@ -189,15 +188,20 @@ bool Cellular::init(unsigned char* gpu_texture_, int w_, int h_) {
 
   blocks = dim3{w / threads.x, h / threads.y};
 
-  CUDA_CALL(cudaMalloc(&cuda_buf[0], w * h * sizeof(float)));
-  CUDA_CALL(cudaMalloc(&cuda_buf[1], w * h * sizeof(float)));
+  cuda_buf[0] = GpuSlice<float>::alloc(w * h);
+  cuda_buf[1] = GpuSlice<float>::alloc(w * h);
+  cpu_buf = CpuSlice<float>::alloc(w * h);
 
-  float* cpu_buf = (float*)malloc(w * h * sizeof(float));
-  cpu_init(cpu_buf, w, h);
+  assert(cpu_buf.ptr);
+  assert(cuda_buf[0].ptr);
+  assert(cuda_buf[1].ptr);
 
-  CUDA_CALL(cudaMemcpy(cuda_buf[1], cpu_buf, w * h * sizeof(float), cudaMemcpyHostToDevice));
+  cpu_init(cpu_buf.ptr, w, h);
+  cuda_buf[1].copy_from(cpu_buf);
 
-  CUDA_KERNEL(cuda_init<<<blocks, threads>>>(cuda_buf[1], w, h));
+  CUDA_KERNEL(cuda_init<<<blocks, threads>>>(cuda_buf[1].ptr, w, h));
+
+  CUDA_CALL(cudaMalloc(&config_gpu, sizeof(Config)));
 
   return true;
 }
@@ -214,19 +218,30 @@ bool Cellular::update() {
 
   {
     ImGui::Begin("Settings");
-    
+
     const auto& io = ImGui::GetIO();
     ImGui::Text("%.1f FPS (%.3f ms/frame)", io.Framerate, 1000.0f / io.Framerate);
 
     ImGui::Checkbox("ImGui Demo Window", &show_demo_window);
 
     ImGui::SliderFloat("dt", &config.dt, 0.0f, 1.0f);
+    ImGui::DragFloatRange2("birth", &config.b1, &config.b2, .001f, 0.f, 1.f);
+    ImGui::DragFloatRange2("death", &config.d1, &config.d2, .001f, 0.f, 1.f);
+    ImGui::SliderFloat("alpha_outer", &config.alpha_outer, 0.f, 1.f);
+    ImGui::SliderFloat("alpha_inner", &config.alpha_inner, 0.f, 1.f);
+    
+    if (ImGui::Button("Reset")) {
+      cuda_buf[1].copy_from(cpu_buf);
+    }
+    
     ImGui::End();
   }
 
+  copy_to_gpu(config_gpu, &config);
+
   std::swap(cuda_buf[0], cuda_buf[1]);
-  CUDA_KERNEL(cuda_frame<<<blocks, threads>>>(cuda_buf[0], cuda_buf[1], w, h));
-  CUDA_KERNEL(cuda_val_to_col<<<blocks, threads>>>(cuda_buf[1], gpu_texture, w, h));
+  CUDA_KERNEL(cuda_frame<<<blocks, threads>>>(cuda_buf[0].ptr, cuda_buf[1].ptr, w, h, *config_gpu));
+  CUDA_KERNEL(cuda_val_to_col<<<blocks, threads>>>(cuda_buf[1].ptr, gpu_texture, w, h));
 
   return true;
 }

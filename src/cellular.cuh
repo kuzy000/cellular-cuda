@@ -1,5 +1,7 @@
 #pragma once
 
+#include "common.cuh"
+
 __host__ __device__ int mod(int a, int b);
 
 void cpu_init(float* out, int w, int h);
@@ -24,6 +26,16 @@ __host__ __device__ float trans_paper(float inner, float outer);
 __device__ float saturate(float v);
 __global__ void cuda_frame(float* in, float* out, int w, int h);
 __global__ void cuda_val_to_col(float* in, unsigned char* out, int w, int h);
+  
+struct Config {
+  float dt = 0.3f;
+  float b1 = 0.257f;
+  float b2 = 0.336f;
+  float d1 = 0.365f;
+  float d2 = 0.549f;
+  float alpha_outer = 0.028f;
+  float alpha_inner = 0.147f;
+};
 
 class Cellular {
 public:
@@ -36,17 +48,14 @@ private:
   int w;
   int h;
 
-  float* cuda_buf[2];
-  float* cpu_buf;
+  GpuSlice<float> cuda_buf[2];
+  CpuSlice<float> cpu_buf;
 
   const dim3 threads{16, 16};
   dim3 blocks;
   
   bool show_demo_window = false;
-  
-  struct Config {
-      float dt = 0.3f;
-  };
 
   Config config;
+  Config* config_gpu;
 };
